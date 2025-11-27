@@ -1,4 +1,3 @@
-# main.py
 from typing import List, Optional
 from datetime import datetime
 from fastapi import FastAPI, Query, status, HTTPException
@@ -15,19 +14,6 @@ class Video(BaseModel):
     generateDate: datetime
     baseUrl: str
     movieId: str
-
-    # APIドキュメント用のサンプルデータ
-    class Config:
-        schema_extra = {
-            "example": {
-                "title": "過去一アガった瞬間！！",
-                "tags": ["大阪駅", "tag2", "tag3"],
-                "location": "camera1",
-                "generateDate": "2025-11-27T10:42:30",
-                "baseUrl": "https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
-                "movieId": "uuid-example"
-            }
-        }
 
 # アゲ報告用のリクエストボディ
 class ReportRequest(BaseModel):
@@ -183,11 +169,11 @@ def videos_bulk(request: BulkVideosRequest):
 
     return results
 
-@app.get("/cameras", response_model=Camera)
-def get_camera(id: str = Query(..., description="カメラのUUID")):
+@app.get("/cameras/{id}", response_model=Camera)
+def get_camera(id: str):
     """
     カメラ情報取得API
-    GET /cameras?id=UUID
+    GET /cameras/{id}
     """
 
     for cam in MOCK_CAMERAS:
