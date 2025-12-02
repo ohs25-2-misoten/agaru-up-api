@@ -1,6 +1,6 @@
-# main.py
 from typing import List, Optional
-from fastapi import FastAPI, Query, status
+from datetime import datetime
+from fastapi import FastAPI, Query, status, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -11,6 +11,7 @@ class Video(BaseModel):
     title: str
     tags: List[str]
     location: str
+    generateDate: datetime
     baseUrl: str
     movieId: str
 
@@ -24,6 +25,18 @@ class BulkVideosRequest(BaseModel):
     videos: List[str]
 
 
+# カメラ位置情報
+class Coordinate(BaseModel):
+    lat: float
+    lng: float
+
+
+# カメラ情報の型
+class Camera(BaseModel):
+    name: str
+    id: str
+    coordinate: Coordinate
+    url: str
 
 # 仮のデータベース
 MOCK_VIDEOS: List[Video] = [
@@ -31,6 +44,7 @@ MOCK_VIDEOS: List[Video] = [
         title="過去一アガった瞬間！！",
         tags=["大阪駅", "tag2", "tag3"],
         location="camera1",
+        generateDate=datetime.fromisoformat("2025-11-27T10:42:30"),
         baseUrl="https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
         movieId="uuid-example-1",
     ),
@@ -38,6 +52,7 @@ MOCK_VIDEOS: List[Video] = [
         title="友達と過ごした最高の一日",
         tags=["梅田", "tag2"],
         location="camera2",
+        generateDate=datetime.fromisoformat("2025-11-27T10:42:30"),
         baseUrl="https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
         movieId="uuid-example-2",
     ),
@@ -45,10 +60,28 @@ MOCK_VIDEOS: List[Video] = [
         title="過去一アガった瞬間！！",
         tags=["大阪駅", "tag3"],
         location="camera3",
+        generateDate=datetime.fromisoformat("2025-11-27T10:42:30"),
         baseUrl="https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
         movieId="uuid-example-3",
     ),
     # 必要に応じて追加
+]
+
+
+# 仮のカメラデータ（本番では複数のカメラが存在）
+MOCK_CAMERAS: List[Camera] = [
+    Camera(
+        name="camera1",
+        id="2cb22c82-d689-4c31-b75c-2528d92e5c84",
+        coordinate=Coordinate(lat=37.7749, lng=-122.4194),
+        url="2cb22c82-d689-4c31-b75c-2528d92e5c84.raspberrypi.local",
+    ),
+    Camera(
+        name="camera2",
+        id="3a111111-aaaa-4bbb-cccc-1234567890ab",
+        coordinate=Coordinate(lat=35.6895, lng=139.6917),
+        url="3a111111-aaaa-4bbb-cccc-1234567890ab.raspberrypi.local",
+    ),
 ]
 
 # 動画検索API
@@ -136,3 +169,15 @@ def videos_bulk(request: BulkVideosRequest):
 
     return results
 
+@app.get("/cameras/{id}", response_model=Camera)
+def get_camera(id: str):
+    """
+    カメラ情報取得API
+    GET /cameras/{id}
+    """
+
+    for cam in MOCK_CAMERAS:
+        if cam.id == id:
+            return cam
+
+    raise HTTPException(status_code=404, detail="camera not found")
