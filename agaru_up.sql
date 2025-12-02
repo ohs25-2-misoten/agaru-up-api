@@ -8,4 +8,7 @@ CREATE TABLE IF NOT EXISTS videos (
     movieId    TEXT UNIQUE,
     createdAt  TEXT DEFAULT (datetime('now')),
     updatedAt  TEXT DEFAULT (datetime('now'))
+
+    FOREIGN KEY (cameraId) REFERENCES cameras(id)
 );
+
