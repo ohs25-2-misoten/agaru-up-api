@@ -1,5 +1,8 @@
 from typing import List, Optional
 from datetime import datetime
+from pathlib import Path
+import sqlite3
+
 from fastapi import FastAPI, Query, status, HTTPException
 from pydantic import BaseModel
 
@@ -14,6 +17,8 @@ class Video(BaseModel):
     generateDate: datetime
     baseUrl: str
     movieId: str
+    url: str
+
 
 # アゲ報告用のリクエストボディ
 class ReportRequest(BaseModel):
@@ -38,51 +43,66 @@ class Camera(BaseModel):
     coordinate: Coordinate
     url: str
 
-# 仮のデータベース
-MOCK_VIDEOS: List[Video] = [
-    Video(
-        title="過去一アガった瞬間！！",
-        tags=["大阪駅", "tag2", "tag3"],
-        location="camera1",
-        generateDate=datetime.fromisoformat("2025-11-27T10:42:30"),
-        baseUrl="https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
-        movieId="uuid-example-1",
-    ),
-    Video(
-        title="友達と過ごした最高の一日",
-        tags=["梅田", "tag2"],
-        location="camera2",
-        generateDate=datetime.fromisoformat("2025-11-27T10:42:30"),
-        baseUrl="https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
-        movieId="uuid-example-2",
-    ),
-    Video(
-        title="過去一アガった瞬間！！",
-        tags=["大阪駅", "tag3"],
-        location="camera3",
-        generateDate=datetime.fromisoformat("2025-11-27T10:42:30"),
-        baseUrl="https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com/agaru-up-videos",
-        movieId="uuid-example-3",
-    ),
-    # 必要に応じて追加
-]
+# 仮のデータベースパス（SQLite DB名：data.db）
+DB_PATH = Path(__file__).parent / "data.db"
 
 
-# 仮のカメラデータ（本番では複数のカメラが存在）
-MOCK_CAMERAS: List[Camera] = [
-    Camera(
-        name="camera1",
-        id="2cb22c82-d689-4c31-b75c-2528d92e5c84",
-        coordinate=Coordinate(lat=37.7749, lng=-122.4194),
-        url="2cb22c82-d689-4c31-b75c-2528d92e5c84.raspberrypi.local",
-    ),
-    Camera(
-        name="camera2",
-        id="3a111111-aaaa-4bbb-cccc-1234567890ab",
-        coordinate=Coordinate(lat=35.6895, lng=139.6917),
-        url="3a111111-aaaa-4bbb-cccc-1234567890ab.raspberrypi.local",
-    ),
-]
+def get_conn():
+        """
+        SQLite 接続を返すヘルパー関数。
+
+        - `DB_PATH` に指定されたファイルへ接続します。
+        - 戻り値の接続オブジェクトは `row_factory` に `sqlite3.Row` を設定しており、
+            カラム名でアクセスできる辞書風の行オブジェクトを返します。
+        - 呼び出し元は使用後に `conn.close()` を呼んで接続を閉じてください。
+        - このアプリは既存の SQLite DB を前提としています。DB ファイルが存在しない
+            場合は接続時にエラーになります。
+        """
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+def row_to_video(row: sqlite3.Row) -> Video:
+    # DB の行 (Row) を Video モデルへ変換するヘルパー
+    # - `tags` カラムはカンマ区切り文字列なのでリストへ分割する
+    # - `createdAt` を datetime に変換して `generateDate` にセットする
+    # - `url` は `baseUrl` と `movieId` を結合して作る
+    #   （拡張子が必要な場合は下のコメントを参考にしてください）
+    tags = []
+    if row["tags"]:
+        tags = [t for t in row["tags"].split(",") if t]
+
+    created = None
+    if row["createdAt"]:
+        # 'YYYY-MM-DD HH:MM:SS' または ISO 形式を想定
+        created = datetime.fromisoformat(row["createdAt"])
+
+    # 動画ファイルに拡張子が必要な場合は、以下のように。
+    # file_url_with_ext = f"{row['baseUrl'].rstrip('/')}/{row['movieId']}.mp4"
+
+    return Video(
+        title=row["title"],
+        tags=tags,
+        location=row["location"],
+        generateDate=created or datetime.utcnow(),
+        baseUrl=row["baseUrl"],
+        movieId=row["movieId"],
+        url=(f"{row['baseUrl'].rstrip('/')}/{row['movieId']}")
+    )
+
+
+def row_to_camera(row: sqlite3.Row) -> Camera:
+    # DB の行 (Row) を Camera モデルへ変換するヘルパー
+    # 注意: テーブルのカラム名は提供された通り `latitude` / `logitude`（typo）を使用しています。
+    # 必要ならアプリ側で `longitude` にマッピングするか、DB側を修正してください。
+    return Camera(
+        name=row["name"],
+        id=row["id"],
+        coordinate=Coordinate(lat=row["latitude"], lng=row["logitude"]),
+        url=row["url"],
+    )
+
 
 # 動画検索API
 @app.get("/videos", response_model=List[Video])
@@ -98,7 +118,13 @@ def list_videos(
     GET /videos?q=検索ワード&tags=タグ&limit=10
     """
 
-    results = MOCK_VIDEOS
+    # DB から動画を取得してフィルタリング
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM videos ORDER BY createdAt DESC")
+    rows = cur.fetchall()
+    results: List[Video] = [row_to_video(r) for r in rows]
+    conn.close()
 
     # q（タイトル検索）
     if q:
@@ -136,14 +162,21 @@ def list_tags():
     GET /tags
     """
 
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT tags FROM videos ORDER BY createdAt ASC")
     seen = set()
     tags: List[str] = []
-    for v in MOCK_VIDEOS:
-        for t in v.tags:
+    for row in cur.fetchall():
+        tstr = row["tags"]
+        if not tstr:
+            continue
+        for t in [x.strip() for x in tstr.split(",") if x.strip()]:
             if t not in seen:
                 seen.add(t)
                 tags.append(t)
 
+    conn.close()
     return tags
 
 # uuid指定検索API
@@ -158,8 +191,17 @@ def videos_bulk(request: BulkVideosRequest):
     見つからないUUIDはスキップします。
     """
 
-    # movieId -> Video マッピングを作成
-    id_map = {v.movieId: v for v in MOCK_VIDEOS}
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # fetch matching videos
+    placeholders = ",".join(["?"] * len(request.videos)) if request.videos else ""
+    if not request.videos:
+        return []
+
+    cur.execute(f"SELECT * FROM videos WHERE movieId IN ({placeholders})", tuple(request.videos))
+    rows = cur.fetchall()
+    id_map = {row["movieId"]: row_to_video(row) for row in rows}
 
     results: List[Video] = []
     for vid in request.videos:
@@ -167,8 +209,10 @@ def videos_bulk(request: BulkVideosRequest):
         if video:
             results.append(video)
 
+    conn.close()
     return results
 
+# カメラ情報取得API
 @app.get("/cameras/{id}", response_model=Camera)
 def get_camera(id: str):
     """
@@ -176,8 +220,13 @@ def get_camera(id: str):
     GET /cameras/{id}
     """
 
-    for cam in MOCK_CAMERAS:
-        if cam.id == id:
-            return cam
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM cameras WHERE id = ?", (id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if row:
+        return row_to_camera(row)
 
     raise HTTPException(status_code=404, detail="camera not found")
