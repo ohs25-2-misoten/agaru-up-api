@@ -94,12 +94,10 @@ def row_to_video(row: sqlite3.Row) -> Video:
 
 def row_to_camera(row: sqlite3.Row) -> Camera:
     # DB の行 (Row) を Camera モデルへ変換するヘルパー
-    # 注意: テーブルのカラム名は提供された通り `latitude` / `logitude`（typo）を使用しています。
-    # 必要ならアプリ側で `longitude` にマッピングするか、DB側を修正してください。
     return Camera(
         name=row["name"],
         id=row["id"],
-        coordinate=Coordinate(lat=row["latitude"], lng=row["logitude"]),
+        coordinate=Coordinate(lat=row["latitude"], lng=row["longitude"]),
         url=row["url"],
     )
 
