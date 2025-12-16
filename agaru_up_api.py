@@ -2,6 +2,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
+import requests
 from zoneinfo import ZoneInfo
 import os
 import uuid
@@ -10,11 +11,19 @@ try:
 except Exception:
     boto3 = None
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Query, status, HTTPException
 from fastapi import UploadFile, File
 from pydantic import BaseModel
 
-app = FastAPI()
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+app = FastAPI(
+    title="アゲアップAPI",
+    description="動画検索・アゲ報告API",
+    version="1.0.0"
+)
 
 
 # 動画検索時の返り値1件分の型
@@ -32,6 +41,9 @@ class Video(BaseModel):
 class ReportRequest(BaseModel):
     user: str
     location: str
+    title: Optional[str] = None
+    tags: Optional[List[str]] = None
+    generateDate: Optional[datetime] = None
 
 # 複数UUIDで動画を取得するリクエストボディ
 class BulkVideosRequest(BaseModel):
@@ -109,7 +121,7 @@ def row_to_video(row: sqlite3.Row) -> Video:
         generateDate=created or datetime.now(tz_jp),
         baseUrl=row["baseUrl"],
         movieId=row["movieId"],
-        url=(f"{row['baseUrl'].rstrip('/')}/{row['movieId']}")
+        url=(f"{row['baseUrl'].rstrip('/')}/{row['movieId']}.mp4")
     )
 
 
@@ -167,6 +179,14 @@ def list_videos(
         cur.execute(query, params)
         rows = cur.fetchall()
         results: List[Video] = [row_to_video(r) for r in rows]
+    except Exception as e:
+        # デバッグ用にエラー詳細を出力
+        import traceback
+        print(f"Error in list_videos: {e}")
+        print(f"Query: {query}")
+        print(f"Params: {params}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"動画検索でエラーが発生しました: {str(e)}")
     finally:
         conn.close()
 
@@ -180,9 +200,82 @@ def report_agereport(report: ReportRequest):
     POST /report
     Body: {"user": "...", "location": "..."}
     """
+    # ラズパイ上のカメラにアクセスして動画を取得し、R2へ保存してDBにメタデータを登録する。
+    # location に ".raspi.local" を付与してラズパイのホストへアクセスする想定。
 
-    # 本来はここで DB に保存したりイベントを発行したりします。
-    return {"message": "Report received", "user": report.user, "location": report.location}
+    # 1) ラズパイから動画を取得
+    raspi_host = f"http://{report.location}.raspi.local"
+    try:
+        resp = requests.get(raspi_host, stream=True, timeout=30)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"カメラからの動画取得に失敗しました: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"カメラが正常なレスポンスを返しませんでした: {resp.status_code}")
+
+    # 2) R2へアップロード
+    bucket = os.getenv("R2_BUCKET", "agaru-up-videos")
+    movie_id = str(uuid.uuid4())  # movieId（拡張子なし）
+    r2_key = f"{movie_id}.mp4"  # R2のファイル名（拡張子付き）
+    try:
+        s3 = _get_s3_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"R2クライアントの初期化に失敗しました: {e}")
+
+    try:
+        # response.raw はファイルライクオブジェクトなので直接渡せる
+        resp.raw.decode_content = True
+        content_type = resp.headers.get("Content-Type", "video/mp4")
+        s3.upload_fileobj(resp.raw, bucket, r2_key, ExtraArgs={"ContentType": content_type})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"R2へのアップロードに失敗しました: {e}")
+
+    # アップロード成功 URL を構築
+    # 公開URLを使用（.envのR2_PUBLIC_URLまたはデフォルト）
+    public_url = os.getenv("R2_PUBLIC_URL", "https://pub-fe496443fb104153b0da8cceaccc6aea.r2.dev")
+    file_url = f"{public_url.rstrip('/')}/{r2_key}"
+
+    # 3) DBへ保存（videosテーブルのスキーマに従って保存）
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        # generateDate をリクエストから受け取るか現在時刻（日本時間）を使う
+        tz_jp = ZoneInfo("Asia/Tokyo")
+        if report.generateDate:
+            gd = report.generateDate
+            if gd.tzinfo is None:
+                # naive は UTC とみなす
+                gd = gd.replace(tzinfo=timezone.utc)
+            created_at_dt = gd.astimezone(tz_jp)
+        else:
+            created_at_dt = datetime.now(tz_jp)
+
+        # 格納は ISO 形式（秒精度）にする
+        created_at = created_at_dt.replace(microsecond=0).isoformat()
+
+        base_url = public_url  # 公開URLをbaseUrlとして保存
+
+        # title/tags はリクエストの値を優先、それ以外はデフォルト値
+        title = report.title or f"{report.user}さんのアゲ報告"
+        tags_str = ""
+        if report.tags:
+            # リストをカンマ区切りで格納
+            tags_str = ",".join([t.strip() for t in report.tags if t.strip()])
+
+        # location に report.location（カメラID）を格納
+        cur.execute(
+            "INSERT INTO videos (title, tags, location, baseUrl, movieId, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+            (title, tags_str, report.location, base_url, movie_id, created_at),
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        # DB保存に失敗した場合、アップロード済みオブジェクトを削除することも検討できますが
+        # ここではエラーを返す。
+        raise HTTPException(status_code=500, detail=f"データベースへの保存に失敗しました: {e}")
+    finally:
+        conn.close()
+
+    return {"message": "アゲ報告を受け付けました", "user": report.user, "location": report.location, "movieId": movie_id, "url": file_url}
 
 # タグリスト一覧取得API
 @app.get("/tags", response_model=List[str])
@@ -268,7 +361,7 @@ def get_camera(id: str):
 
 
 # ------------------------------------------------------------
-# 動画アップロード (Cloudflare R2)
+# R2 クライアント取得ヘルパー
 # 環境変数:
 # - R2_ENDPOINT (例: https://<account-id>.r2.cloudflarestorage.com)
 # - R2_ACCESS_KEY_ID
@@ -291,31 +384,3 @@ def _get_s3_client():
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
     )
-
-
-@app.post("/videos/upload")
-async def upload_video_to_r2(file: UploadFile = File(...)):
-    """受け取った動画ファイルを Cloudflare R2 にアップロードして URL を返す
-
-    - ファイル名は自動で UUID.mp4 を割り当てます。
-    - 必要な環境変数: R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY。R2_ENDPOINT と R2_BUCKET は任意。
-    """
-
-    bucket = os.getenv("R2_BUCKET", "agaru-up-videos")
-    key = f"{uuid.uuid4()}.mp4"
-
-    try:
-        s3 = _get_s3_client()
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    try:
-        # upload_fileobj はファイルオブジェクトを受け取る
-        s3.upload_fileobj(file.file, bucket, key, ExtraArgs={"ContentType": file.content_type or "video/mp4"})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"upload failed: {e}")
-
-    endpoint = os.getenv("R2_ENDPOINT", "https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com").rstrip('/')
-    file_url = f"{endpoint}/{bucket}/{key}"
-
-    return {"movieId": key, "url": file_url}
