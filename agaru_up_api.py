@@ -3,8 +3,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 from zoneinfo import ZoneInfo
+import os
+import uuid
+try:
+    import boto3
+except Exception:
+    boto3 = None
 
 from fastapi import FastAPI, Query, status, HTTPException
+from fastapi import UploadFile, File
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -49,23 +56,23 @@ DB_PATH = Path(__file__).parent / "data.db"
 
 
 def get_conn():
-        """
-        SQLite 接続を返すヘルパー関数。
+    """
+    SQLite 接続を返すヘルパー関数。
 
-        - `DB_PATH` に指定されたファイルへ接続します。
-        - 戻り値の接続オブジェクトは `row_factory` に `sqlite3.Row` を設定しており、
-            カラム名でアクセスできる辞書風の行オブジェクトを返します。
-        - 呼び出し元は使用後に `conn.close()` を呼んで接続を閉じてください。
-        - このアプリは既存の SQLite DB を前提としています。DB ファイルが存在しない
-            場合は接続時にエラーになります。
-        """
-        try:
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
-            return conn
-        except sqlite3.Error as e:
-            # DB に接続できない場合は HTTP 503 を返す
-            raise HTTPException(status_code=503, detail=f"DB unavailable: {e}")
+    - `DB_PATH` に指定されたファイルへ接続します。
+    - 戻り値の接続オブジェクトは `row_factory` に `sqlite3.Row` を設定しており、
+        カラム名でアクセスできる辞書風の行オブジェクトを返します。
+    - 呼び出し元は使用後に `conn.close()` を呼んで接続を閉じてください。
+    - このアプリは既存の SQLite DB を前提としています。DB ファイルが存在しない
+        場合は接続時にエラーになります。
+    """
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as e:
+        # DB に接続できない場合は HTTP 503 を返す
+        raise HTTPException(status_code=503, detail=f"DB unavailable: {e}")
 
 
 def row_to_video(row: sqlite3.Row) -> Video:
@@ -255,6 +262,60 @@ def get_camera(id: str):
         row = cur.fetchone()
         if row:
             return row_to_camera(row)
-        raise HTTPException(status_code=404, detail="camera not found")
+        raise HTTPException(status_code=404, detail=f"Camera not found: {id}")
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------
+# 動画アップロード (Cloudflare R2)
+# 環境変数:
+# - R2_ENDPOINT (例: https://<account-id>.r2.cloudflarestorage.com)
+# - R2_ACCESS_KEY_ID
+# - R2_SECRET_ACCESS_KEY
+# - R2_BUCKET (デフォルト: agaru-up-videos)
+# ------------------------------------------------------------
+
+
+def _get_s3_client():
+    if boto3 is None:
+        raise RuntimeError("boto3 is required for R2 uploads. Install with `pip install boto3`.")
+
+    endpoint = os.getenv("R2_ENDPOINT", "https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com")
+    access_key = os.getenv("R2_ACCESS_KEY_ID")
+    secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
+
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    )
+
+
+@app.post("/videos/upload")
+async def upload_video_to_r2(file: UploadFile = File(...)):
+    """受け取った動画ファイルを Cloudflare R2 にアップロードして URL を返す
+
+    - ファイル名は自動で UUID.mp4 を割り当てます。
+    - 必要な環境変数: R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY。R2_ENDPOINT と R2_BUCKET は任意。
+    """
+
+    bucket = os.getenv("R2_BUCKET", "agaru-up-videos")
+    key = f"{uuid.uuid4()}.mp4"
+
+    try:
+        s3 = _get_s3_client()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        # upload_fileobj はファイルオブジェクトを受け取る
+        s3.upload_fileobj(file.file, bucket, key, ExtraArgs={"ContentType": file.content_type or "video/mp4"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"upload failed: {e}")
+
+    endpoint = os.getenv("R2_ENDPOINT", "https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com").rstrip('/')
+    file_url = f"{endpoint}/{bucket}/{key}"
+
+    return {"movieId": key, "url": file_url}
