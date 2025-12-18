@@ -297,7 +297,7 @@ def list_tags():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT tags FROM videos ORDER BY createdAt ASC")
+        cur.execute("SELECT tags FROM videos")
         seen = set()
         tags: List[str] = []
         for row in cur.fetchall():
