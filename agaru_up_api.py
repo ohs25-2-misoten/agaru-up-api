@@ -88,11 +88,20 @@ def get_conn():
 
 
 def row_to_video(row: sqlite3.Row) -> Video:
-    # DB の行 (Row) を Video モデルへ変換するヘルパー
-    # - `tags` カラムはカンマ区切り文字列なのでリストへ分割する
-    # - `createdAt` を datetime に変換して `generateDate` にセットする
-    # - `url` は `baseUrl` と `movieId` を結合して作る
-    #   （拡張子が必要な場合は下のコメントを参考にしてください）
+    """
+    DB の行 (sqlite3.Row) を Video モデルへ変換するヘルパー関数。
+
+    Args:
+        row (sqlite3.Row): SQLite の Row オブジェクト。動画情報を含む。
+
+    Returns:
+        Video: 変換された Video モデルインスタンス。
+
+    Notes:
+        - `tags` カラムはカンマ区切り文字列として格納されているため、分割してリストに変換します。
+        - `createdAt` カラムは文字列（'YYYY-MM-DD HH:MM:SS' または ISO 形式）で格納されているため、datetime型に変換し、Videoモデルの `generateDate` にセットします。値がない場合は現在時刻（UTC）をデフォルト値として使用します。
+        - `url` フィールドは `baseUrl` と `movieId` を結合して生成します。動画ファイルに拡張子が必要な場合は、`.mp4` などを付与してください（例: `f"{row['baseUrl'].rstrip('/')}/{row['movieId']}.mp4"`）。
+    """
     tags = []
     if row["tags"]:
         tags = [t for t in row["tags"].split(",") if t]
