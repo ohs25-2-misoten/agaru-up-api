@@ -4,10 +4,17 @@
 
 ## 必要要件
 
+- Cloudflare アカウント（R2バケットと Cloudflare Tunnel のセットアップが必須）
 - [mise](https://mise.jdx.dev/) - 開発環境管理ツール
 - [1Password CLI](https://developer.1password.com/docs/cli/) - シークレット管理
 - [Docker](https://www.docker.com/) - コンテナ実行環境
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) - Cloudflare Tunnel
+
+### Cloudflare の事前セットアップ
+
+- R2 を使う場合: Cloudflare で R2 バケットを作成し、Access Key/Secret を発行しておきます。
+- アプリを外部公開する場合: Cloudflare Tunnel を作成し、トークンを取得して `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定します。
+- R2 ではなく AWS S3 などの S3 互換ストレージも利用可能です。S3 のバケットと IAM ユーザーを用意し、後述の `R2_*` 環境変数に S3 の値を入れてください（名前はそのままで動作します）。
 
 ## セットアップ
 
@@ -61,6 +68,17 @@ R2_BUCKET=agaru-up-videos
 R2_ACCESS_KEY_ID=your_actual_access_key_id
 R2_SECRET_ACCESS_KEY=your_actual_secret_access_key
 R2_PUBLIC_URL=https://pub-fe496443fb104153b0da8cceaccc6aea.r2.dev
+CLOUDFLARE_TUNNEL_TOKEN=your_actual_tunnel_token
+```
+
+S3 を使う場合の例（`R2_*` 名のまま S3 の値を設定します）:
+
+```env
+R2_ENDPOINT=https://s3.ap-northeast-1.amazonaws.com
+R2_BUCKET=your_s3_bucket
+R2_ACCESS_KEY_ID=your_aws_access_key_id
+R2_SECRET_ACCESS_KEY=your_aws_secret_access_key
+R2_PUBLIC_URL=https://your_s3_bucket.s3.ap-northeast-1.amazonaws.com
 CLOUDFLARE_TUNNEL_TOKEN=your_actual_tunnel_token
 ```
 
