@@ -8,13 +8,21 @@ import os
 import uuid
 try:
     import boto3
-except Exception:
+except ImportError:
     boto3 = None
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, status, HTTPException
-from fastapi import UploadFile, File
+# from fastapi import UploadFile, File
 from pydantic import BaseModel
+import logging
+
+# ロガーの設定
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -25,6 +33,46 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+import random
+
+@app.on_event("startup")
+def init_db():
+    """
+    アプリ起動時にSQLiteデータベースを初期化する。
+    テーブルが存在しない場合は作成する。
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        cur = conn.cursor()
+        # videosテーブル作成
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                tags TEXT,
+                location TEXT,
+                baseUrl TEXT,
+                movieId TEXT UNIQUE,
+                createdAt TEXT
+            )
+        """)
+        # camerasテーブル作成
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cameras (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                latitude REAL,
+                longitude REAL,
+                url TEXT
+            )
+        """)
+        conn.commit()
+        print("✅ Database initialized successfully")
+    except sqlite3.Error as e:
+        print(f"❌ Database initialization error: {e}")
+    finally:
+        conn.close()
 
 # 動画検索時の返り値1件分の型
 class Video(BaseModel):
@@ -88,20 +136,11 @@ def get_conn():
 
 
 def row_to_video(row: sqlite3.Row) -> Video:
-    """
-    DB の行 (sqlite3.Row) を Video モデルへ変換するヘルパー関数。
-
-    Args:
-        row (sqlite3.Row): SQLite の Row オブジェクト。動画情報を含む。
-
-    Returns:
-        Video: 変換された Video モデルインスタンス。
-
-    Notes:
-        - `tags` カラムはカンマ区切り文字列として格納されているため、分割してリストに変換します。
-        - `createdAt` カラムは文字列（'YYYY-MM-DD HH:MM:SS' または ISO 形式）で格納されているため、datetime型に変換し、Videoモデルの `generateDate` にセットします。値がない場合は現在時刻（UTC）をデフォルト値として使用します。
-        - `url` フィールドは `baseUrl` と `movieId` を結合して生成します。動画ファイルに拡張子が必要な場合は、`.mp4` などを付与してください（例: `f"{row['baseUrl'].rstrip('/')}/{row['movieId']}.mp4"`）。
-    """
+    # DB の行 (Row) を Video モデルへ変換するヘルパー
+    # - `tags` カラムはカンマ区切り文字列なのでリストへ分割する
+    # - `createdAt` を datetime に変換して `generateDate` にセットする
+    # - `url` は `baseUrl` と `movieId` を結合して作る
+    #   （拡張子が必要な場合は下のコメントを参考にしてください）
     tags = []
     if row["tags"]:
         tags = [t for t in row["tags"].split(",") if t]
@@ -211,24 +250,35 @@ def report_agereport(report: ReportRequest):
     """
     # ラズパイ上のカメラにアクセスして動画を取得し、R2へ保存してDBにメタデータを登録する。
     # location に ".raspi.local" を付与してラズパイのホストへアクセスする想定。
+    
+    logger.info(f"Received report request from user: {report.user}, location: {report.location}")
 
     # 1) ラズパイから動画を取得
-    raspi_host = f"http://{report.location}.raspi.local"
+    raspi_host = f"http://{report.location}.easy-hacking.com/videos?time=60"
+    logger.info(f"Fetching video from camera: {raspi_host}")
+    
     try:
-        resp = requests.get(raspi_host, stream=True, timeout=30)
+        resp = requests.get(raspi_host, stream=True, timeout=600)
     except requests.RequestException as e:
+        logger.error(f"Failed to fetch video from {raspi_host}: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"カメラからの動画取得に失敗しました: {e}")
 
     if resp.status_code != 200:
+        logger.error(f"Camera returned non-200 status code: {resp.status_code}")
         raise HTTPException(status_code=502, detail=f"カメラが正常なレスポンスを返しませんでした: {resp.status_code}")
+    
+    logger.info("Successfully fetched video from camera")
 
     # 2) R2へアップロード
     bucket = os.getenv("R2_BUCKET", "agaru-up-videos")
     movie_id = str(uuid.uuid4())  # movieId（拡張子なし）
     r2_key = f"{movie_id}.mp4"  # R2のファイル名（拡張子付き）
+    logger.info(f"Uploading to R2 bucket: {bucket}, key: {r2_key}")
+
     try:
         s3 = _get_s3_client()
     except RuntimeError as e:
+        logger.error("Failed to initialize R2 client", exc_info=True)
         raise HTTPException(status_code=500, detail=f"R2クライアントの初期化に失敗しました: {e}")
 
     try:
@@ -236,7 +286,9 @@ def report_agereport(report: ReportRequest):
         resp.raw.decode_content = True
         content_type = resp.headers.get("Content-Type", "video/mp4")
         s3.upload_fileobj(resp.raw, bucket, r2_key, ExtraArgs={"ContentType": content_type})
+        logger.info("Successfully uploaded video to R2")
     except Exception as e:
+        logger.error(f"Failed to upload to R2: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"R2へのアップロードに失敗しました: {e}")
 
     # アップロード成功 URL を構築
@@ -245,6 +297,7 @@ def report_agereport(report: ReportRequest):
     file_url = f"{public_url.rstrip('/')}/{r2_key}"
 
     # 3) DBへ保存（videosテーブルのスキーマに従って保存）
+    logger.info("Saving metadata to database...")
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -264,12 +317,30 @@ def report_agereport(report: ReportRequest):
 
         base_url = public_url  # 公開URLをbaseUrlとして保存
 
+        # 未来創造展で上がった瞬間のタイトル候補リスト
+        FUTURE_TITLES = [
+            "未来創造展で最高の作品に出会った！",
+            "これが未来だ！テンション爆上げ中！",
+            "未来創造展で感動の瞬間をキャッチ！",
+            "学生の創造力がヤバすぎる！アガる！",
+            "未来創造展2026、熱気がスゴい！",
+            "HAL大阪の技術力に圧倒された！",
+            "未来を感じてテンションMAX！",
+            "クリエイターの情熱に心が震えた！",
+            "未来創造展で夢が広がる瞬間！",
+            "最先端の技術に出会ってアガりまくり！",
+            "こんな作品見たことない！感動！",
+            "未来創造展、期待を超えてきた！",
+        ]
+
         # title/tags はリクエストの値を優先、それ以外はデフォルト値
-        title = report.title or f"{report.user}さんのアゲ報告"
+        # タイトルが未指定の場合はランダムに選択して、ユーザー名を頭につける
+        title = report.title or random.choice(FUTURE_TITLES)
         tags_str = ""
-        if report.tags:
+        tags = ["未来創造展", "アガる", "未来創造展2026", "HAL大阪"]
+        if tags:
             # リストをカンマ区切りで格納
-            tags_str = ",".join([t.strip() for t in report.tags if t.strip()])
+            tags_str = ",".join([t.strip() for t in tags if t.strip()])
 
         # location に report.location（カメラID）を格納
         cur.execute(
@@ -277,7 +348,9 @@ def report_agereport(report: ReportRequest):
             (title, tags_str, report.location, base_url, movie_id, created_at),
         )
         conn.commit()
+        logger.info(f"Successfully saved to DB with movieId: {movie_id}")
     except sqlite3.Error as e:
+        logger.error(f"Database error: {e}", exc_info=True)
         # DB保存に失敗した場合、アップロード済みオブジェクトを削除することも検討できますが
         # ここではエラーを返す。
         raise HTTPException(status_code=500, detail=f"データベースへの保存に失敗しました: {e}")
@@ -297,21 +370,23 @@ def list_tags():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT tags FROM videos")
-        seen = set()
-        tags: List[str] = []
+        # DISTINCTでユニークなtags文字列を取得
+        cur.execute("SELECT DISTINCT tags FROM videos WHERE tags IS NOT NULL AND tags != '' ORDER BY createdAt ASC")
+        seen: set[str] = set()
+        unique_tags: List[str] = []
         for row in cur.fetchall():
             tstr = row["tags"]
             if not tstr:
                 continue
+            # カンマ区切りの各タグを分解して重複除去
             for t in [x.strip() for x in tstr.split(",") if x.strip()]:
                 if t not in seen:
                     seen.add(t)
-                    tags.append(t)
+                    unique_tags.append(t)
     finally:
         conn.close()
 
-    return tags
+    return unique_tags
 
 # uuid指定検索API
 @app.post("/videos/bulk", response_model=List[Video])
@@ -386,6 +461,12 @@ def _get_s3_client():
     endpoint = os.getenv("R2_ENDPOINT", "https://21b073b9670215c4e64a2c3e6525f259.r2.cloudflarestorage.com")
     access_key = os.getenv("R2_ACCESS_KEY_ID")
     secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
+
+    # クォートが含まれている場合に除去する処理を追加
+    if access_key:
+        access_key = access_key.strip('"\'')
+    if secret_key:
+        secret_key = secret_key.strip('"\'')
 
     return boto3.client(
         "s3",

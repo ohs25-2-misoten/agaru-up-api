@@ -1,0 +1,31 @@
+[tools]
+python = "3.14.2"
+
+[tasks."docker:build"]
+description = "Build Docker image"
+run = "docker build -t agaru-up-api ."
+
+[tasks."docker:down"]
+description = "Stop and remove Docker container"
+run = "docker stop agaru-up-api 2>/dev/null || true && docker rm agaru-up-api 2>/dev/null || true"
+
+[tasks.dev]
+description = "Run API locally"
+run = "uvicorn agaru_up_api:app --reload"
+
+[tasks."dev:op"]
+description = "Run API with 1Password CLI"
+run = "op run -- uvicorn agaru_up_api:app --reload"
+
+[tasks."tunnel:up"]
+description = "Publish api through cloudflare tunnel"
+run = "op run --env-file='.env' -- bash -c 'cloudflared tunnel run --token $CLOUDFLARE_TUNNEL_TOKEN'"
+
+[tasks."docker:run"]
+description = "Run Docker container"
+run = "bash -c 'if docker ps -a | grep -q agaru-up-api; then docker start agaru-up-api; else docker run -d --name agaru-up-api --env-file <(op inject -i .env) -p 8080:80 agaru-up-api; fi'"
+
+[tasks."docker:run:public"]
+description = "Run Docker container with 1Password secrets from .env with tunnel"
+run = "bash -c 'mise run docker:run && mise run tunnel:up'"
+
