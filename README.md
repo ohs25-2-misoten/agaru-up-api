@@ -2,6 +2,8 @@
 
 動画検索・アゲ報告API for 未来創造展2026
 
+[Githubはこちら](https://github.com/ohs25-2-misoten/agaru-up-api)
+
 ## 必要要件
 
 - Cloudflare アカウント（R2バケットと Cloudflare Tunnel のセットアップが必須）
